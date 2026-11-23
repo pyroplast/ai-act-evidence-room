@@ -34,7 +34,8 @@ from typing import Any, Protocol
 from ai_disclosure_scan import api as scanner_api
 from sqlalchemy.orm import Session, sessionmaker
 
-from evidence_room import audit
+from evidence_room import audit, notify
+from evidence_room.config import get_settings
 from evidence_room.fingerprint import fingerprint, subject_for
 from evidence_room.models import Artifact, Finding, Scan, Touchpoint
 from evidence_room.store import ArtifactStore
@@ -78,6 +79,18 @@ class ScanError(Exception):
     """The scan could not produce trustworthy findings. The message is stored on the scan."""
 
 
+class _NoLongerRunning(Exception):
+    """The scan row was finished by someone else (the worker's stale-scan reaper)."""
+
+
+def _lock_running_scan(session: Session, scan_id: int) -> Scan:
+    scan = session.get(Scan, scan_id, with_for_update=True)
+    assert scan is not None
+    if scan.status != "running":
+        raise _NoLongerRunning(f"scan {scan_id} is already {scan.status}")
+    return scan
+
+
 @dataclass(frozen=True)
 class _Outcome:
     result: Any  # ai_disclosure_scan.api.ScanResult
@@ -110,8 +123,14 @@ def run_scan(
     triggered_by: str = "manual",
     clock: Clock = utcnow,
     scanner: ScannerAPI = scanner_api,  # type: ignore[assignment]
+    base_url: str | None = None,
 ) -> int:
-    """Scan one touchpoint now. Returns the new scan's id, whatever its outcome."""
+    """Scan one touchpoint now. Returns the new scan's id, whatever its outcome.
+
+    The scan's events (regressions, resolutions, or the failure) are queued for
+    notification in the same transaction that records the outcome (see notify.py).
+    """
+    base_url = base_url or get_settings().app_base_url
     with session_factory() as session, session.begin():
         touchpoint = session.get(Touchpoint, touchpoint_id)
         if touchpoint is None:
@@ -148,11 +167,18 @@ def run_scan(
     outcome: _Outcome | None = None
     try:
         outcome = _call_scanner(scanner, tp_snapshot, clock)
-        _record_success(session_factory, scan_id, tp_snapshot, outcome, store, scanner, clock)
-    except Exception as exc:
+        _record_success(
+            session_factory, scan_id, tp_snapshot, outcome, store, scanner, clock, base_url
+        )
+    except _NoLongerRunning as exc:
+        log.warning("not recording scan %s: %s", scan_id, exc)
+        return scan_id
+    except Exception as exc:  # every failure is recorded on the scan
         message = str(exc) if isinstance(exc, ScanError) else f"{type(exc).__name__}: {exc}"
         log.warning("scan %s of touchpoint %s failed: %s", scan_id, tp_snapshot.id, message)
-        _record_failure(session_factory, scan_id, tp_snapshot, message, outcome, store, clock)
+        _record_failure(
+            session_factory, scan_id, tp_snapshot, message, outcome, store, clock, base_url
+        )
     return scan_id
 
 
@@ -276,6 +302,7 @@ def _record_success(
     store: ArtifactStore,
     scanner: ScannerAPI,
     clock: Clock,
+    base_url: str,
 ) -> None:
     errors = _target_errors(outcome)
     if errors:
@@ -283,11 +310,10 @@ def _record_success(
     if not outcome.result.report.results:
         raise ScanError("scanner returned no results")
     with session_factory() as session, session.begin():
+        scan = _lock_running_scan(session, scan_id)
         artifacts = _store_artifacts(session, scan_id, outcome, store, clock)
         findings = _findings(scan_id, tp, outcome, scanner)
         session.add_all(findings)
-        scan = session.get(Scan, scan_id)
-        assert scan is not None
         scan.status = "done"
         scan.finished_at = outcome.finished
         session.flush()
@@ -307,6 +333,7 @@ def _record_success(
             },
             clock=clock,
         )
+        notify.queue_events(session, scan_id, clock=clock, base_url=base_url)
 
 
 def _record_failure(
@@ -317,8 +344,14 @@ def _record_failure(
     outcome: _Outcome | None,
     store: ArtifactStore,
     clock: Clock,
+    base_url: str,
 ) -> None:
     with session_factory() as session, session.begin():
+        try:
+            scan = _lock_running_scan(session, scan_id)
+        except _NoLongerRunning as exc:
+            log.warning("not recording failure of scan %s: %s", scan_id, exc)
+            return
         artifacts: list[Artifact] = []
         if outcome is not None:
             try:
@@ -327,8 +360,6 @@ def _record_failure(
             except Exception as exc:
                 log.warning("could not keep artifacts of failed scan %s: %s", scan_id, exc)
                 artifacts = []
-        scan = session.get(Scan, scan_id)
-        assert scan is not None
         scan.status = "error"
         scan.error = message
         scan.finished_at = outcome.finished if outcome is not None else clock()
@@ -342,3 +373,4 @@ def _record_failure(
             {"touchpoint_id": tp.id, "error": message, "artifacts": [a.sha256 for a in artifacts]},
             clock=clock,
         )
+        notify.queue_events(session, scan_id, clock=clock, base_url=base_url)

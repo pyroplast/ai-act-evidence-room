@@ -111,3 +111,35 @@ Decided by the project owner after D-012 showed that switching the demo page fro
 The view gains `prev_status` and `status` (with `absent` when there is no finding) for the M3 event payload. When several findings share one fingerprint in a scan, the most severe one represents it. Migration `0005_regressions_by_severity` re-applies `sql/views.sql`, per D-005. Its downgrade does not restore the old definition, because the view is derived data.
 
 **Cost:** a brand-new REVIEW finding now raises an alert as well as a new GAP. That is deliberate (a lawyer has something new to look at), but it means more alerts than a GAP-only rule. First scans remain a silent baseline, and failed scans are still never compared (D-014).
+
+## D-018 — Worker: claim by moving `next_run_at`, under `FOR UPDATE SKIP LOCKED` (M3)
+
+A plain loop over `next_run_at` (no APScheduler). Each tick claims due touchpoints in **one short transaction**: `SELECT … WHERE active AND next_run_at <= now AND no scan of it is queued/running … FOR UPDATE OF t SKIP LOCKED LIMIT n`. Before committing, it moves each claimed row's `next_run_at` forward (daily +1 day, weekly +7 days, manual → NULL). After the commit the row is no longer due, so no other worker can claim it, and `SKIP LOCKED` hands a concurrent claimer other rows instead of making it wait. The scan then runs with no lock held, so a long browser scan never pins a transaction. Two tests cover this: a direct test that a second claimer receives disjoint rows, and a test where two workers tick concurrently over 10 due touchpoints and each is scanned exactly once.
+
+- The "no scan running" condition stops a "scan now" request from starting a second scan of a touchpoint that is already being scanned.
+- `next_run_at` is `claimed_at + interval`. Missed runs (the worker was down for three days) are not caught up one by one: one scan runs, and the schedule continues from then.
+- **Stale scans.** A scan still `running` after `SCAN_STALE_MINUTES` (default 60) belongs to a worker that died. The reaper marks it `error` ("abandoned"), audits `scan.failed` and queues the event, which frees the touchpoint. If that worker was only slow, the runner locks the scan row before recording and leaves a row that is no longer `running` alone, so a reaped scan is never overwritten as `done`.
+
+## D-019 — Deliveries: one row per attempt; retries 1, 5, 30, 120 minutes (M3)
+
+PLAN.md's `deliveries` table has one row with an `attempt` counter, which would keep only the last outcome. "Every attempt logged" is taken literally instead: **each attempt is its own row** (migration 0006 adds `event_id` and `attempted_at`; `(webhook_id, event_id, attempt)` is unique). A pending row has `attempted_at` NULL and is due at `next_attempt_at`. The worker claims due rows one per transaction with `FOR UPDATE SKIP LOCKED`, sends, and records the status code or error on that row. On failure it inserts the next attempt, due **1, 5, 30, then 120 minutes after the failed attempt**. That makes five attempts in total, then it gives up (logged). Any 2xx is success. Everything else is a failure and is retried, including no response at all and 401 (a rotated secret should not lose events).
+
+- Webhook secrets are stored in plain text, because computing an HMAC needs the raw secret. Protect the database accordingly. The secret is never written to the audit log (`webhook.created` records only the URL and events).
+- Delivery attempts are not audit events: the deliveries table is their log. The event itself is audited (D-020).
+- Headers: `X-Evidence-Signature: t=<unix>,v1=<hex hmac_sha256(secret, "<t>." + body)>`, `X-Evidence-Event`, `X-Evidence-Event-Id` (stable across attempts, for idempotent receivers) and `X-Evidence-Attempt`. The body is canonical JSON (sorted keys, no whitespace, UTF-8).
+
+## D-020 — Events are queued in the scan's own transaction (outbox) (M3)
+
+`notify.queue_events` runs inside the transaction that records a scan as `done` or `error` (and inside the reaper's transaction). It reads that scan's rows from `v_regressions` and appends one `event.emitted` audit row per event. Then it inserts one pending delivery per active, subscribed webhook (an empty `events` list means all events). A recorded scan therefore always has its events, and a rolled-back scan never does. This holds whether the scan came from the worker, `evidence-room scan`, or (in M4) the "scan now" button.
+
+- `event_id = sha256(event ␟ scan_id ␟ fingerprint)`, stable across retries and webhooks.
+- The payload has the event, matter (id, title, client), touchpoint (id, kind, target) and scan (id, previous scan, finished_at). For finding events it adds the finding: rule, paragraph, previous and current status, fingerprint, the scanner's detail, target and location, and the scanner's `basis` pinpoints with their URLs (rule 5). It also carries the evidence: the SHA-256 of the stored file the finding was computed from (page HTML, or the transcript or media file) plus the scan's `report.json` hash. Finally it has a deep link and the scope line. For a `scan.failed` event the payload carries the error.
+- Deep links point at `/findings/{id}` and `/scans/{id}` under `APP_BASE_URL`. Those pages arrive with the M4 UI.
+
+## D-021 — Email digest: one plain-text email per scan with events, off by default (M3)
+
+Enabled only when both `SMTP_HOST` and `DIGEST_TO` are set (STARTTLS and login are optional via env). After a scan that produced events, the worker sends one email listing them: rule, Article paragraph, status change, target, evidence hash and link, ending with the scope line. It is a fixed template, with no model. Email is best effort: a failure is logged and does not affect the scan or the webhooks, which remain the system of record. It is not audited. "Digest" means one email per scan rather than one per finding, not a timed daily summary. A daily roll-up can come later if a design partner wants it.
+
+## D-022 — The demo webhook sink verifies signatures (M3)
+
+`docker/webhook-sink/sink.py` (standard library only) verifies `X-Evidence-Signature` with `SINK_SECRET` and a 300-second timestamp tolerance. It answers 401 to a bad signature and 200 otherwise, and records every request with `verified` and `reason`. `POST /_control {"fail_status": 500}` makes it fail on purpose, for the retry demo. Tests load the same file in-process (with the timestamp check off, because the worker signs with the tests' frozen clock), so the code the demo runs is the code the tests exercise. Its `verify()` matches `evidence_room.notify.verify()`, and a test asserts that both give the same answers.

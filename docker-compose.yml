@@ -41,6 +41,15 @@ services:
       dockerfile: Dockerfile.worker
     environment:
       DATABASE_URL: *db-url
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8000}
+      # Optional email digest: off unless SMTP_HOST and DIGEST_TO are set.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      DIGEST_FROM: ${DIGEST_FROM:-evidence-room@localhost}
+      DIGEST_TO: ${DIGEST_TO:-}
     depends_on:
       app:
         condition: service_healthy   # the app container runs the migrations
@@ -66,6 +75,7 @@ services:
       context: docker/webhook-sink
     environment:
       SINK_SECRET: ${WEBHOOK_SECRET:-demo-webhook-secret}
+      SINK_TOLERANCE_SECONDS: "300"
     ports:
       - "127.0.0.1:${SINK_PORT:-8082}:8080"
     healthcheck:

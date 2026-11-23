@@ -21,6 +21,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -231,22 +232,34 @@ class Webhook(Base):
 
 
 class Delivery(Base):
+    """One attempt to deliver one event to one webhook.
+
+    A pending attempt has ``attempted_at`` NULL and is due at ``next_attempt_at``. When
+    it fails and retries remain, the worker records the outcome on this row and inserts
+    the next attempt as a new row, so every attempt stays on file (D-019).
+    """
+
     __tablename__ = "deliveries"
     __table_args__ = (
         Index(
             "ix_deliveries_pending",
             "next_attempt_at",
-            postgresql_where=text("delivered_at IS NULL"),
+            postgresql_where=text("attempted_at IS NULL"),
         ),
+        UniqueConstraint("webhook_id", "event_id", "attempt", name="uq_deliveries_attempt"),
+        CheckConstraint("attempt >= 1", name="ck_deliveries_attempt"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     webhook_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("webhooks.id"), index=True)
     event: Mapped[str] = mapped_column(Text)
+    # Stable id of the event; the same for every attempt and every webhook.
+    event_id: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    attempt: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    attempt: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     status_code: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _ts(server_default=func.now())
     next_attempt_at: Mapped[datetime | None] = _ts()
+    attempted_at: Mapped[datetime | None] = _ts()
     delivered_at: Mapped[datetime | None] = _ts()
