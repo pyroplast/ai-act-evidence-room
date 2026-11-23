@@ -51,16 +51,16 @@ flowchart LR
 ## Milestones
 
 ### M0: Skeleton
-- [ ] `pyproject.toml`, `src/evidence_room/`, `Dockerfile` (app) + `Dockerfile.worker` (with Chromium), `docker-compose.yml` with `db`, `app`, `worker` and a `demo` profile
-- [ ] Alembic set up; `/healthz` endpoint; `Makefile` targets `up`, `test`, `lint`, `demo`, `bench`
-- [ ] GitHub Actions: ruff + pytest against a Postgres service
+- [x] `pyproject.toml`, `src/evidence_room/`, `Dockerfile` (app) + `Dockerfile.worker` (with Chromium), `docker-compose.yml` with `db`, `app`, `worker` and a `demo` profile
+- [x] Alembic set up; `/healthz` endpoint; `Makefile` targets `up`, `test`, `lint`, `demo`, `bench`
+- [x] GitHub Actions: ruff + pytest against a Postgres service
 - **Accept:** `docker compose up` gives a healthy app; CI is green on an empty test.
 
 ### M1: Schema, integrity and audit chain
-- [ ] Migrations for every table above
-- [ ] `sql/triggers.sql`: block UPDATE/DELETE on `findings`, `reviews` and `audit_log`; block UPDATE on `artifacts` except setting `purged_at`
-- [ ] `sql/views.sql` with the four views
-- [ ] `audit.append(actor, action, entity, id, payload)` computes the hash chain inside the same transaction as the change it records
+- [x] Migrations for every table above
+- [x] `sql/triggers.sql`: block UPDATE/DELETE on `findings`, `reviews` and `audit_log`; block UPDATE on `artifacts` except setting `purged_at`
+- [x] `sql/views.sql` with the four views
+- [x] `audit.append(actor, action, entity, id, payload)` computes the hash chain inside the same transaction as the change it records
 - **Accept:** tests prove that (a) UPDATE/DELETE on protected tables raises, (b) the chain verifies, (c) editing one audit row directly (with the trigger temporarily disabled in the test) makes verification fail at that row.
 
 ### M2: Scan runner on top of ai-disclosure-scan
