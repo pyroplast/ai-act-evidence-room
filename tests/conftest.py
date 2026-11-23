@@ -8,6 +8,7 @@ disappear again between tests.
 
 from __future__ import annotations
 
+import itertools
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -73,6 +74,35 @@ def db_url() -> Iterator[str]:
     migrate(url)
     yield url
     drop_database(TEST_DB)
+
+
+TEMPLATE_DB = "evidence_room_test_template"
+_fresh_counter = itertools.count(1)
+
+
+@pytest.fixture(scope="session")
+def template_db() -> Iterator[str]:
+    """A migrated database used as a template; cloning it is much faster than migrating."""
+    migrate(recreate_database(TEMPLATE_DB))
+    yield TEMPLATE_DB
+    drop_database(TEMPLATE_DB)
+
+
+@pytest.fixture
+def fresh_db_url(template_db: str) -> Iterator[str]:
+    """An empty, migrated database of this test's own, for code that commits.
+
+    Rows in append-only tables cannot be deleted, so tests of code that commits (the
+    runner, the worker) get a throwaway database instead of a rolled-back transaction.
+    """
+    name = f"evidence_room_test_fresh_{os.getpid()}_{next(_fresh_counter)}"
+    admin = create_engine(SERVER_URL, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        conn.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{template_db}"'))
+    admin.dispose()
+    yield url_for(name)
+    drop_database(name)
 
 
 @pytest.fixture(scope="session")

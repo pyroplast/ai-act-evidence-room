@@ -10,6 +10,8 @@ Short records of choices made where `PLAN.md` / `CLAUDE.md` left room, or where 
 
 **Cost:** the SHA is repeated in two files; both carry a comment pointing at each other.
 
+**Update (M2):** upstream now has a tag. ai-disclosure-scan `v0.5.0` (commit `cefdc38c05149b6089c9c1dfb3092fe8f30566ab`, the Python API from D-016) is pinned as `@v0.5.0` in `pyproject.toml` and as `SCANNER_REF=v0.5.0` in the fixtures-site image.
+
 ## D-002 — Locked dependency versions via `constraints.txt` (M0)
 
 `pyproject.toml` declares compatible ranges; `constraints.txt` (a `pip freeze` of a clean install with all extras) pins exact versions. Docker builds and CI install with `-c constraints.txt`, so images and CI resolve the same versions. No extra tool (uv/poetry) is required. Regenerate it with `pip freeze --exclude-editable` after a deliberate upgrade.
@@ -65,3 +67,33 @@ Tests need Postgres-specific behaviour (triggers, `jsonb`, advisory locks, `DIST
 ## D-011 — CI runs on every push and smoke-tests the full compose stack (M0/M1)
 
 CI runs on pushes to any branch, on pull requests and on manual dispatch, so a milestone can be verified on a branch before it reaches `main`. Besides ruff and pytest against a `postgres:16` service, the `compose-smoke` job builds all three images, waits for `db`, `app` and `worker` to be up, checks `/healthz`, and launches Chromium inside the worker to prove the `browser` extra is usable. This is the check behind M0's "`docker compose up` gives a healthy app".
+
+## D-012 — `northwind-bad` gives REVIEW, not GAP, in a static scan (M2)
+
+PLAN.md's M2 acceptance says "`northwind-bad` produces GAP findings". The scanner (0.4.0 and 0.5.0) does not do that in static mode: it reports **PAGE-001 REVIEW** (Botpress widget, no AI wording in the page) and **LBL-001 REVIEW** (AI-made `hero.png`, no visible label). From HTML alone it cannot see what the widget says, so by design it asks a person to look. A GAP for that page (BRW-001) needs browser mode, and the page loads the real `cdn.botpress.cloud` script, which rule 6 rules out for tests and the demo. With no network the inline script draws nothing, and browser mode reports PAGE-005 (no widget).
+
+**Decision:** keep the scanner's judgement. Changing its severities to satisfy a test would make the evidence untrue. The test asserts what the scanner really reports: `northwind-bad` gives the two REVIEW findings and no PASS; `northwind-good` gives PAGE-003 and LBL-002 PASS. The transcript and media fixtures do produce GAPs (INT-001/002/003/004, MED-001) and are tested as planned.
+
+**Open for M3/M6 (needs a decision before M3):** switching the fixture site from good to bad changes PAGE-003 PASS / LBL-002 PASS into PAGE-001 REVIEW / LBL-001 REVIEW. These are different rule IDs, so different fingerprints, and none is a GAP. With D-008's definition, the planted page regression would raise **no** `finding.regressed` event.
+
+## D-013 — Fingerprint = touchpoint ␟ rule ␟ subject ␟ normalised location (M2)
+
+`sha256(touchpoint_id ␟ rule_id ␟ subject ␟ normalised_location)`, with U+001F as the separator so no two different part lists hash alike. `subject` is empty for a page touchpoint, and otherwise the file's path relative to the touchpoint's folder (plus `#conversation-id`). It has to be in the key: a transcript batch yields INT-010 at "message 1" for several conversations, and those must stay distinct. It is relative so the same folder scanned from another mount gives the same fingerprints. The location is lower-cased and whitespace-collapsed. Browser locations of the form "widget opened via …" normalise to "widget", because which launcher worked can change between runs without the page changing. Implemented in `evidence_room/fingerprint.py`, and resolves D-009.
+
+## D-014 — Scan error semantics (M2)
+
+A scan is all-or-nothing. If the scanner raises, reports an error for **any** target (for example HTTP 404, or one unreadable transcript file), returns no results, or reports a rule missing from its own catalogue (rule 5), the scan is stored as `error` with the message, `finished_at` is set, and `scan.failed` is audited. It gets no findings, so a partially failed scan can never make missing findings look "resolved", and the views never compare against it. Artifacts the scanner did return before failing (its `report.json` naming the error, the evidence it fetched) are kept and audited. `run_scan` returns the scan id; it does not raise for scan failures, and the failure is visible on the row. Unknown touchpoint options are refused rather than ignored.
+
+The runner uses three short transactions (start, scan with no transaction open, record), so a long browser scan never holds locks. If recording fails after files were written to the store, those files stay as unreferenced blobs. That is harmless, because the store is content-addressed.
+
+## D-015 — What the audit chain records per scan (M2)
+
+`scan.started` (touchpoint, target, scanner version, who triggered it); one `artifact.stored` per artifact (kind, name, sha256, bytes); `scan.finished` (finding count by status, the artifact hashes, and `findings_digest`); or `scan.failed` (the error). `findings_digest` is one SHA-256 over every finding's fingerprint, rule, status, target, location, detail and evidence. It ties the immutable finding rows into the chain without one audit row per finding: a 100-conversation batch costs one event, not hundreds.
+
+## D-016 — Python API upstream (ai-disclosure-scan 0.5.0); fixtures vendored for tests (M2)
+
+The scanner had importable functions but no way to get back the content its findings were computed from, so it got a thin, additive `ai_disclosure_scan.api` module, as PLAN.md asks: [pyroplast/ai-disclosure-scan#1](https://github.com/pyroplast/ai-disclosure-scan/pull/1). `scan_pages` / `scan_transcripts` / `scan_media` return the `Report` and a list of `Evidence`: the page HTML as fetched (or the rendered DOM), every media file the label check inspected, a full-page screenshot in browser mode, and each transcript or media file exactly as read. `rule_basis(rule_id)` returns the catalogue entry. `generated_at=` makes the report JSON byte-identical for the same input. Findings are unchanged; that is tested upstream, including in browser mode. This repo stores `rule_basis()` verbatim in `findings.basis`.
+
+`artifacts` gained `name` and `media_type` (migration 0004), so each stored file says which URL or file it came from.
+
+The Northwind sites, transcripts and media are copied into `tests/fixtures/scanner-examples/` (see its `PROVENANCE.md`), because the scanner's wheel does not ship `examples/` and tests must not download anything. Pages are served from `127.0.0.1` by the test process. CI installs Playwright's Chromium, so the browser-mode runner test runs instead of being skipped.

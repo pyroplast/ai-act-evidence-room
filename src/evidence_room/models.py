@@ -150,6 +150,9 @@ class Artifact(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     scan_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("scans.id"), index=True)
     kind: Mapped[str] = mapped_column(Text)
+    # Where the bytes came from (URL, file path or a page's media src) and their type.
+    name: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    media_type: Mapped[str] = mapped_column(Text, server_default=text("''"))
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     bytes: Mapped[int] = mapped_column(BigInteger)
     path: Mapped[str] = mapped_column(Text)
