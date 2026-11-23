@@ -70,11 +70,11 @@ flowchart LR
 - **Accept:** against the local Northwind fixtures, `northwind-bad` produces GAP findings, `northwind-good` produces PASS, a bad transcript produces INT-002/INT-003, and `examples/media` reproduces MED-001/MED-002. Same input twice gives the same findings and the same fingerprints.
 
 ### M3: Scheduler, regressions and notifications
-- [ ] Worker loop: claim due touchpoints with `FOR UPDATE SKIP LOCKED`, run, set `next_run_at`. Two workers never run the same touchpoint
-- [ ] After each scan, diff against the previous one using `v_regressions`; emit `finding.regressed`, `finding.resolved`, `scan.failed` events
-- [ ] Webhooks: JSON payload with matter, touchpoint, rule, paragraph, evidence hash and a deep link; header `X-Evidence-Signature: t=<unix>,v1=<hmac_sha256(secret, t.body)>`; retries at 1, 5, 30 and 120 minutes; every attempt logged in `deliveries`
-- [ ] Optional SMTP email digest (env-configured; off by default)
-- [ ] `webhook-sink` demo container that verifies the signature and logs what it received
+- [x] Worker loop: claim due touchpoints with `FOR UPDATE SKIP LOCKED`, run, set `next_run_at`. Two workers never run the same touchpoint
+- [x] After each scan, diff against the previous one using `v_regressions`; emit `finding.regressed`, `finding.resolved`, `scan.failed` events
+- [x] Webhooks: JSON payload with matter, touchpoint, rule, paragraph, evidence hash and a deep link; header `X-Evidence-Signature: t=<unix>,v1=<hmac_sha256(secret, t.body)>`; retries at 1, 5, 30 and 120 minutes; every attempt logged in `deliveries`
+- [x] Optional SMTP email digest (env-configured; off by default)
+- [x] `webhook-sink` demo container that verifies the signature and logs what it received
 - **Accept:** test with two workers proves no double run; switching a fixture from good to bad emits exactly one `finding.regressed` per new GAP or REVIEW (D-017); the sink verifies the signature; a sink returning 500 is retried on schedule.
 
 ### M4: Review UI
