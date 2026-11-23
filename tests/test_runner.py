@@ -403,3 +403,51 @@ def test_browser_scan_stores_rendered_html_and_a_screenshot(
     shot = next(a for a in artifacts(sf, scan_id) if a.kind == "screenshot")
     assert store.get(shot.sha256).startswith(b"\x89PNG")
     assert ("PAGE-005", "info") in statuses(findings(sf, scan_id))
+
+
+# --- the planted page regression (good -> bad at the same URL) ---------------------------
+
+
+@pytest.fixture
+def switchable_site(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """Serves ``/northwind/`` from a symlink the test can point at good or bad."""
+    root = tmp_path / "www"
+    root.mkdir()
+    link = root / "northwind"
+    link.symlink_to(EXAMPLES / "sites" / "northwind-good", target_is_directory=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_Quiet, directory=str(root)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/northwind/", link
+    server.shutdown()
+    server.server_close()
+
+
+def test_good_to_bad_page_is_a_regression(
+    sf: sessionmaker[Session], store: ArtifactStore, switchable_site: tuple[str, Path]
+) -> None:
+    """D-017: PASS (or absent) -> REVIEW counts. The rule IDs change between the two
+    versions of the page, so the REVIEW findings are new fingerprints."""
+    url, link = switchable_site
+    tp = touchpoint(sf, "page", url)
+    clock = ticking()
+    good = run_scan(sf, tp, store=store, clock=clock)
+    link.unlink()
+    link.symlink_to(EXAMPLES / "sites" / "northwind-bad", target_is_directory=True)
+    bad = run_scan(sf, tp, store=store, clock=clock)
+
+    assert statuses(findings(sf, good)) == {("PAGE-003", "pass"), ("LBL-002", "pass")}
+    with sf() as s:
+        found = s.execute(
+            text(
+                "SELECT rule_id, change, prev_status, status, prev_scan_id FROM v_regressions "
+                "WHERE scan_id = :b ORDER BY rule_id"
+            ),
+            {"b": bad},
+        ).all()
+    # Exactly one regression per new REVIEW finding; the PASS findings that disappeared
+    # were never a problem, so they are not "resolved".
+    assert [tuple(r) for r in found] == [
+        ("LBL-001", "regressed", "absent", "review", good),
+        ("PAGE-001", "regressed", "absent", "review", good),
+    ]

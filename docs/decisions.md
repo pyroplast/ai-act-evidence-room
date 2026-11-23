@@ -52,7 +52,7 @@ Roles, statuses, kinds and review decisions are `text` columns with `CHECK (col 
 ## D-008 — Regression and effective-status definitions in the views (M1)
 
 - **Effective status** (`v_effective_findings`): the latest review by `(created_at, id)` wins. `confirm` → the machine status; `override_pass` → `pass`; `override_gap` → `gap`; `not_applicable` → `not_applicable`; `needs_client_input` → `needs_client_input`; no review → the machine status.
-- **Regression** (`v_regressions`): compares each finished scan of a touchpoint with the previous finished scan (`status = 'done'`, ordered by `finished_at, id`). A fingerprint is *regressed* when it is `gap` now and was not `gap` before (`pass`, `review`, `info` or absent). It is *resolved* when it was `gap` before and is not `gap` now (including absent). The plan says "PASS or absent"; the broader "not gap" was chosen because a `review` → `gap` move is also something a lawyer wants to hear about, and it is simpler to state. A touchpoint's first finished scan is a baseline and produces no rows. Failed scans (`status = 'error'`) are skipped, so a failure never raises a regression (M2 rule).
+- **Regression** (`v_regressions`): *superseded by D-017.* Original definition: compares each finished scan of a touchpoint with the previous finished scan (`status = 'done'`, ordered by `finished_at, id`). A fingerprint is *regressed* when it is `gap` now and was not `gap` before (`pass`, `review`, `info` or absent). It is *resolved* when it was `gap` before and is not `gap` now (including absent). The plan says "PASS or absent"; the broader "not gap" was chosen because a `review` → `gap` move is also something a lawyer wants to hear about, and it is simpler to state. A touchpoint's first finished scan is a baseline and produces no rows. Failed scans (`status = 'error'`) are skipped, so a failure never raises a regression (M2 rule).
 - Regressions use **machine** status, not effective status: a review belongs to one finding in one scan, and the alert is about what the scanner observed changing.
 - **Matter summary** (`v_matter_summary`): counts by matter, Article paragraph and effective status over the latest finished scan of each *active* touchpoint.
 
@@ -74,7 +74,7 @@ PLAN.md's M2 acceptance says "`northwind-bad` produces GAP findings". The scanne
 
 **Decision:** keep the scanner's judgement. Changing its severities to satisfy a test would make the evidence untrue. The test asserts what the scanner really reports: `northwind-bad` gives the two REVIEW findings and no PASS; `northwind-good` gives PAGE-003 and LBL-002 PASS. The transcript and media fixtures do produce GAPs (INT-001/002/003/004, MED-001) and are tested as planned.
 
-**Open for M3/M6 (needs a decision before M3):** switching the fixture site from good to bad changes PAGE-003 PASS / LBL-002 PASS into PAGE-001 REVIEW / LBL-001 REVIEW. These are different rule IDs, so different fingerprints, and none is a GAP. With D-008's definition, the planted page regression would raise **no** `finding.regressed` event.
+**Was open for M3/M6, now resolved by D-017:** switching the fixture site from good to bad changes PAGE-003 PASS / LBL-002 PASS into PAGE-001 REVIEW / LBL-001 REVIEW. These are different rule IDs, so different fingerprints, and none is a GAP. With D-008's definition, the planted page regression would raise **no** `finding.regressed` event.
 
 ## D-013 — Fingerprint = touchpoint ␟ rule ␟ subject ␟ normalised location (M2)
 
@@ -97,3 +97,17 @@ The scanner had importable functions but no way to get back the content its find
 `artifacts` gained `name` and `media_type` (migration 0004), so each stored file says which URL or file it came from.
 
 The Northwind sites, transcripts and media are copied into `tests/fixtures/scanner-examples/` (see its `PROVENANCE.md`), because the scanner's wheel does not ship `examples/` and tests must not download anything. Pages are served from `127.0.0.1` by the test process. CI installs Playwright's Chromium, so the browser-mode runner test runs instead of being skipped.
+
+## D-017 — Regressions are ranked by severity: PASS/INFO/absent → REVIEW counts (decided before M3)
+
+Decided by the project owner after D-012 showed that switching the demo page from good to bad produces only REVIEW findings. `v_regressions` now ranks the machine status: **pass, info or absent = 0; review = 1; gap = 2**.
+
+- **regressed:** severity went up. That covers pass/info/absent → review or gap, and review → gap.
+- **resolved:** severity went down to 0. That covers review or gap → pass, info or absent.
+- **gap → review** gives no row. The finding is still open and was already alerted when it became a gap.
+
+"Absent" has to count as 0. Otherwise the planted page regression still raises nothing: the good page's PAGE-003/LBL-002 and the bad page's PAGE-001/LBL-001 are different rules, so the REVIEW findings are new fingerprints, not a status change on an old one. With this definition, good → bad at the same URL gives exactly two `regressed` rows (PAGE-001 and LBL-001, absent → review), and the PASS findings that disappeared are not reported as "resolved". That is tested end to end in `tests/test_runner.py`.
+
+The view gains `prev_status` and `status` (with `absent` when there is no finding) for the M3 event payload. When several findings share one fingerprint in a scan, the most severe one represents it. Migration `0005_regressions_by_severity` re-applies `sql/views.sql`, per D-005. Its downgrade does not restore the old definition, because the view is derived data.
+
+**Cost:** a brand-new REVIEW finding now raises an alert as well as a new GAP. That is deliberate (a lawyer has something new to look at), but it means more alerts than a GAP-only rule. First scans remain a silent baseline, and failed scans are still never compared (D-014).

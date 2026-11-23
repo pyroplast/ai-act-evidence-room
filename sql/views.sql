@@ -57,9 +57,11 @@ LEFT JOIN LATERAL (
 ) r ON true;
 
 -- Finding-by-finding diff of each finished scan against the previous finished scan of
--- the same touchpoint, matched on fingerprint, using the machine status.
---   regressed: gap now, not gap before (pass / review / info / absent)
---   resolved:  gap before, not gap now (including absent)
+-- the same touchpoint, matched on fingerprint, using the machine status ranked by
+-- severity: pass, info or absent = 0; review = 1; gap = 2 (docs/decisions.md, D-017).
+--   regressed: severity went up   (pass/info/absent -> review or gap, review -> gap)
+--   resolved:  severity went to 0 (review or gap -> pass, info or absent)
+--   gap -> review is neither: still open, already alerted when it became a gap.
 -- A touchpoint's first finished scan is the baseline and yields no rows.
 CREATE VIEW v_regressions AS
 WITH done AS (
@@ -74,24 +76,30 @@ WITH done AS (
 pairs AS (
     SELECT * FROM done WHERE prev_scan_id IS NOT NULL
 ),
-fp AS (
-    SELECT f.scan_id,
-           f.fingerprint,
-           bool_or(f.status = 'gap')                   AS is_gap,
-           min(f.id) FILTER (WHERE f.status = 'gap')   AS gap_finding_id,
-           min(f.id)                                   AS any_finding_id,
-           min(f.rule_id)                              AS rule_id,
-           min(f.paragraph)                            AS paragraph
+ranked AS (
+    SELECT f.*,
+           CASE f.status WHEN 'gap' THEN 2 WHEN 'review' THEN 1 ELSE 0 END AS severity
     FROM findings f
-    GROUP BY f.scan_id, f.fingerprint
+),
+fp AS (
+    -- One row per (scan, fingerprint); the most severe finding represents it.
+    SELECT r.scan_id,
+           r.fingerprint,
+           max(r.severity)                                               AS severity,
+           (array_agg(r.id     ORDER BY r.severity DESC, r.id))[1]       AS finding_id,
+           (array_agg(r.status ORDER BY r.severity DESC, r.id))[1]       AS status,
+           min(r.rule_id)                                                AS rule_id,
+           min(r.paragraph)                                              AS paragraph
+    FROM ranked r
+    GROUP BY r.scan_id, r.fingerprint
 ),
 cur AS (
-    SELECT p.scan_id, fp.fingerprint, fp.is_gap, fp.gap_finding_id, fp.any_finding_id,
+    SELECT p.scan_id, fp.fingerprint, fp.severity, fp.finding_id, fp.status,
            fp.rule_id, fp.paragraph
     FROM pairs p JOIN fp ON fp.scan_id = p.scan_id
 ),
 prv AS (
-    SELECT p.scan_id, fp.fingerprint, fp.is_gap, fp.gap_finding_id, fp.any_finding_id,
+    SELECT p.scan_id, fp.fingerprint, fp.severity, fp.finding_id, fp.status,
            fp.rule_id, fp.paragraph
     FROM pairs p JOIN fp ON fp.scan_id = p.prev_scan_id
 ),
@@ -100,10 +108,12 @@ diff AS (
            COALESCE(cur.fingerprint, prv.fingerprint) AS fingerprint,
            COALESCE(cur.rule_id, prv.rule_id)         AS rule_id,
            COALESCE(cur.paragraph, prv.paragraph)     AS paragraph,
-           COALESCE(cur.is_gap, false)                AS gap_now,
-           COALESCE(prv.is_gap, false)                AS gap_before,
-           COALESCE(cur.gap_finding_id, cur.any_finding_id) AS finding_id,
-           COALESCE(prv.gap_finding_id, prv.any_finding_id) AS prev_finding_id
+           COALESCE(cur.severity, 0)                  AS severity_now,
+           COALESCE(prv.severity, 0)                  AS severity_before,
+           COALESCE(cur.status, 'absent')             AS status,
+           COALESCE(prv.status, 'absent')             AS prev_status,
+           cur.finding_id                             AS finding_id,
+           prv.finding_id                             AS prev_finding_id
     FROM cur
     FULL OUTER JOIN prv
       ON prv.scan_id = cur.scan_id AND prv.fingerprint = cur.fingerprint
@@ -115,12 +125,16 @@ SELECT p.touchpoint_id,
        d.fingerprint,
        d.rule_id,
        d.paragraph,
-       CASE WHEN d.gap_now THEN 'regressed' ELSE 'resolved' END AS change,
+       CASE WHEN d.severity_now > d.severity_before THEN 'regressed'
+            ELSE 'resolved' END AS change,
+       d.prev_status,
+       d.status,
        d.finding_id,
        d.prev_finding_id
 FROM diff d
 JOIN pairs p ON p.scan_id = d.scan_id
-WHERE d.gap_now IS DISTINCT FROM d.gap_before;
+WHERE d.severity_now > d.severity_before
+   OR (d.severity_now = 0 AND d.severity_before > 0);
 
 -- Counts per matter, Article 50 paragraph and effective status, over the latest
 -- finished scan of each active touchpoint.

@@ -54,34 +54,64 @@ def test_regressions_between_consecutive_finished_scans(session: Session) -> Non
     tp = fx.touchpoint(session)
 
     first = fx.scan(session, tp, minutes=0)
-    fx.finding(session, first, "INT-001", "pass")
-    fx.finding(session, first, "INT-002", "gap")
-    fx.finding(session, first, "PAG-001", "review")
-    fx.finding(session, first, "MED-001", "gap")
+    fx.finding(session, first, "A-PASS-GAP", "pass")
+    fx.finding(session, first, "B-GAP-PASS", "gap")
+    fx.finding(session, first, "C-REVIEW-GAP", "review")
+    fx.finding(session, first, "D-GAP-ABSENT", "gap")
+    fx.finding(session, first, "E-PASS-REVIEW", "pass")
+    fx.finding(session, first, "F-INFO-REVIEW", "info")
+    fx.finding(session, first, "G-GAP-REVIEW", "gap")
+    fx.finding(session, first, "H-REVIEW-PASS", "review")
+    fx.finding(session, first, "I-REVIEW-ABSENT", "review")
+    fx.finding(session, first, "J-PASS-ABSENT", "pass")
+    fx.finding(session, first, "K-PASS-INFO", "info")
 
     fx.scan(session, tp, minutes=5, status="error")  # failures never count
 
     second = fx.scan(session, tp, minutes=10)
-    fx.finding(session, second, "INT-001", "gap")  # pass -> gap: regressed
-    fx.finding(session, second, "INT-002", "pass")  # gap -> pass: resolved
-    fx.finding(session, second, "PAG-001", "gap")  # review -> gap: regressed
-    fx.finding(session, second, "NEW-001", "gap")  # absent -> gap: regressed
-    # MED-001 absent now: resolved
+    fx.finding(session, second, "A-PASS-GAP", "gap")
+    fx.finding(session, second, "B-GAP-PASS", "pass")
+    fx.finding(session, second, "C-REVIEW-GAP", "gap")
+    fx.finding(session, second, "E-PASS-REVIEW", "review")
+    fx.finding(session, second, "F-INFO-REVIEW", "review")
+    fx.finding(session, second, "G-GAP-REVIEW", "review")  # better, still open: no row
+    fx.finding(session, second, "H-REVIEW-PASS", "pass")
+    fx.finding(session, second, "K-PASS-INFO", "pass")  # severity 0 -> 0: no row
+    fx.finding(session, second, "L-ABSENT-GAP", "gap")
+    fx.finding(session, second, "M-ABSENT-REVIEW", "review")
+    fx.finding(session, second, "N-ABSENT-PASS", "pass")  # severity 0 -> 0: no row
 
     found = rows(
         session,
-        "SELECT rule_id, change, prev_scan_id FROM v_regressions WHERE touchpoint_id = :t "
-        "ORDER BY rule_id",
+        "SELECT rule_id, change, prev_status, status, prev_scan_id FROM v_regressions "
+        "WHERE touchpoint_id = :t ORDER BY rule_id",
         t=tp.id,
     )
-    assert [(r["rule_id"], r["change"]) for r in found] == [
-        ("INT-001", "regressed"),
-        ("INT-002", "resolved"),
-        ("MED-001", "resolved"),
-        ("NEW-001", "regressed"),
-        ("PAG-001", "regressed"),
+    assert [(r["rule_id"], r["change"], r["prev_status"], r["status"]) for r in found] == [
+        ("A-PASS-GAP", "regressed", "pass", "gap"),
+        ("B-GAP-PASS", "resolved", "gap", "pass"),
+        ("C-REVIEW-GAP", "regressed", "review", "gap"),
+        ("D-GAP-ABSENT", "resolved", "gap", "absent"),
+        ("E-PASS-REVIEW", "regressed", "pass", "review"),
+        ("F-INFO-REVIEW", "regressed", "info", "review"),
+        ("H-REVIEW-PASS", "resolved", "review", "pass"),
+        ("I-REVIEW-ABSENT", "resolved", "review", "absent"),
+        ("L-ABSENT-GAP", "regressed", "absent", "gap"),
+        ("M-ABSENT-REVIEW", "regressed", "absent", "review"),
     ]
     assert {r["prev_scan_id"] for r in found} == {first.id}
+
+
+def test_regression_points_at_the_most_severe_finding_of_a_fingerprint(
+    session: Session,
+) -> None:
+    tp = fx.touchpoint(session)
+    fx.finding(session, fx.scan(session, tp, minutes=0), "LBL-001", "pass", location="img")
+    second = fx.scan(session, tp, minutes=10)
+    fx.finding(session, second, "LBL-001", "review", location="img")
+    worst = fx.finding(session, second, "LBL-001", "gap", location="img")  # same fingerprint
+    (row,) = rows(session, "SELECT * FROM v_regressions WHERE touchpoint_id = :t", t=tp.id)
+    assert (row["change"], row["status"], row["finding_id"]) == ("regressed", "gap", worst.id)
 
 
 def test_first_scan_is_a_baseline(session: Session) -> None:

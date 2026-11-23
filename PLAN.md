@@ -45,7 +45,7 @@ flowchart LR
 **SQL views in `sql/`** (show them in the README):
 - `v_latest_scan`: the latest finished scan per touchpoint
 - `v_effective_findings`: each finding with its latest review applied (machine status, lawyer decision, effective status)
-- `v_regressions`: fingerprints that were PASS or absent in the previous scan and are GAP now, plus resolved ones
+- `v_regressions`: fingerprints whose severity rose since the previous scan (PASS/INFO/absent → REVIEW or GAP, REVIEW → GAP), plus resolved ones (see `docs/decisions.md`, D-017)
 - `v_matter_summary`: counts by Article paragraph and effective status per matter
 
 ## Milestones
@@ -75,7 +75,7 @@ flowchart LR
 - [ ] Webhooks: JSON payload with matter, touchpoint, rule, paragraph, evidence hash and a deep link; header `X-Evidence-Signature: t=<unix>,v1=<hmac_sha256(secret, t.body)>`; retries at 1, 5, 30 and 120 minutes; every attempt logged in `deliveries`
 - [ ] Optional SMTP email digest (env-configured; off by default)
 - [ ] `webhook-sink` demo container that verifies the signature and logs what it received
-- **Accept:** test with two workers proves no double run; switching a fixture from good to bad emits exactly one `finding.regressed` per new GAP; the sink verifies the signature; a sink returning 500 is retried on schedule.
+- **Accept:** test with two workers proves no double run; switching a fixture from good to bad emits exactly one `finding.regressed` per new GAP or REVIEW (D-017); the sink verifies the signature; a sink returning 500 is retried on schedule.
 
 ### M4: Review UI
 - [ ] Login; clients → matters → touchpoints; "scan now" button
