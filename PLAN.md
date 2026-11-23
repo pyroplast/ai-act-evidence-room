@@ -64,9 +64,9 @@ flowchart LR
 - **Accept:** tests prove that (a) UPDATE/DELETE on protected tables raises, (b) the chain verifies, (c) editing one audit row directly (with the trigger temporarily disabled in the test) makes verification fail at that row.
 
 ### M2: Scan runner on top of ai-disclosure-scan
-- [ ] If `ai-disclosure-scan` has no stable importable API, open a small upstream change there: `ai_disclosure_scan.api.scan_pages(...)`, `scan_transcripts(...)`, `scan_media(...)` returning its `Report`, plus a hook that returns the fetched HTML, the screenshot (browser mode) and the rule `basis`. Tag it `v0.5.0` and pin to it here. Until then, pin `v0.4.0` and call the CLI with `-f json`.
-- [ ] `runner.run_scan(touchpoint)`: creates the scan row, runs the scanner, stores every artifact (raw HTML, screenshot, transcript files, media files, full `report.json`) by sha256, writes findings with fingerprints, and writes audit events
-- [ ] Errors are stored on the scan, never swallowed. A failed scan raises no regression
+- [x] If `ai-disclosure-scan` has no stable importable API, open a small upstream change there: `ai_disclosure_scan.api.scan_pages(...)`, `scan_transcripts(...)`, `scan_media(...)` returning its `Report`, plus a hook that returns the fetched HTML, the screenshot (browser mode) and the rule `basis`. Tag it `v0.5.0` and pin to it here. Until then, pin `v0.4.0` and call the CLI with `-f json`.
+- [x] `runner.run_scan(touchpoint)`: creates the scan row, runs the scanner, stores every artifact (raw HTML, screenshot, transcript files, media files, full `report.json`) by sha256, writes findings with fingerprints, and writes audit events
+- [x] Errors are stored on the scan, never swallowed. A failed scan raises no regression
 - **Accept:** against the local Northwind fixtures, `northwind-bad` produces GAP findings, `northwind-good` produces PASS, a bad transcript produces INT-002/INT-003, and `examples/media` reproduces MED-001/MED-002. Same input twice gives the same findings and the same fingerprints.
 
 ### M3: Scheduler, regressions and notifications
