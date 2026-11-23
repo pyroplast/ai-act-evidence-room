@@ -2,8 +2,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,10 +48,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Build and start db + app
-        run: docker compose up -d --build --wait db app
+      - name: Build and start db, app and worker
+        run: docker compose up -d --build --wait db app worker
       - name: Health check
         run: curl --fail --silent --show-error http://localhost:8000/healthz
+      - name: Worker is running and Chromium is installed
+        run: |
+          test "$(docker compose ps --status running -q worker | wc -l)" -eq 1
+          docker compose exec -T worker python -c "from playwright.sync_api import sync_playwright as p; b = p().start().chromium.launch(); print('chromium', b.version); b.close()"
       - name: Logs on failure
         if: failure()
         run: docker compose logs
