@@ -1,0 +1,79 @@
+# Local / single-host deployment. Credentials below are development defaults;
+# override them with environment variables or an .env file for any real deployment.
+name: evidence-room
+
+x-db-url: &db-url postgresql+psycopg://${POSTGRES_USER:-evidence}:${POSTGRES_PASSWORD:-evidence}@db:5432/${POSTGRES_DB:-evidence_room}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-evidence}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-evidence}
+      POSTGRES_DB: ${POSTGRES_DB:-evidence_room}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: *db-url
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    volumes:
+      - store:/data/store
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      DATABASE_URL: *db-url
+    depends_on:
+      app:
+        condition: service_healthy   # the app container runs the migrations
+    volumes:
+      - store:/data/store
+
+  # --- demo profile: everything stays on this machine -------------------------------
+  fixtures-site:
+    profiles: ["demo"]
+    build:
+      context: docker/fixtures-site
+    ports:
+      - "127.0.0.1:${FIXTURES_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  webhook-sink:
+    profiles: ["demo"]
+    build:
+      context: docker/webhook-sink
+    environment:
+      SINK_SECRET: ${WEBHOOK_SECRET:-demo-webhook-secret}
+    ports:
+      - "127.0.0.1:${SINK_PORT:-8082}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  db-data:
+  store:

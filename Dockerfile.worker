@@ -1,0 +1,25 @@
+# worker image: scheduler loop + ai-disclosure-scan with the `browser` extra and Chromium.
+FROM python:3.11-slim-bookworm AS build
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+WORKDIR /build
+COPY pyproject.toml constraints.txt README.md LICENSE ./
+COPY src ./src
+RUN pip install -c constraints.txt '.[browser]'
+
+FROM python:3.11-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH=/opt/venv/bin:$PATH \
+    ARTIFACT_STORE=/data/store PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+COPY --from=build /opt/venv /opt/venv
+# Chromium plus the system libraries it needs, at the version Playwright pins.
+RUN playwright install --with-deps chromium \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd --uid 10001 --create-home evidence \
+ && mkdir -p /data/store && chown evidence:evidence /data/store
+USER evidence
+WORKDIR /app
+CMD ["evidence-room", "worker"]
