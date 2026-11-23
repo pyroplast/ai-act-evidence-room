@@ -1,0 +1,67 @@
+# Design decisions
+
+Short records of choices made where `PLAN.md` / `CLAUDE.md` left room, or where reality differed from the plan. Newest last. Each says what was decided, why, and what it costs.
+
+## D-001 — Scanner pinned by commit SHA, not by tag (M0)
+
+`PLAN.md` says to pin `ai-disclosure-scan` by the git tag `v0.4.0`. Upstream has no tags at all; version 0.4.0 is commit `9e72975ffb9d52eaca59e54690672ba0995335e2` ("Analyse the requested URL, and say so when it is not (0.4.0)"), whose `pyproject.toml` says `version = "0.4.0"`.
+
+**Decision:** pin the full commit SHA in `pyproject.toml` and in `docker/fixtures-site/Dockerfile` (`SCANNER_REF`). A SHA is stricter than a tag (tags can be moved). When upstream tags `v0.5.0` in M2, switch to `@v0.5.0` and record the tag's SHA here.
+
+**Cost:** the SHA is repeated in two files; both carry a comment pointing at each other.
+
+## D-002 — Locked dependency versions via `constraints.txt` (M0)
+
+`pyproject.toml` declares compatible ranges; `constraints.txt` (a `pip freeze` of a clean install with all extras) pins exact versions. Docker builds and CI install with `-c constraints.txt`, so images and CI resolve the same versions. No extra tool (uv/poetry) is required. Regenerate it with `pip freeze --exclude-editable` after a deliberate upgrade.
+
+## D-003 — Migrations run in the app container on start (M0)
+
+The `app` container runs `alembic upgrade head` before starting uvicorn. The worker `depends_on` the app being healthy, and `/healthz` returns 200 only when the database answers *and* `alembic_version` exists, so the worker never starts against an unmigrated schema. A separate one-shot `migrate` service would be cleaner for multi-replica app deployments; this is a single-firm, single-host deployment, so the simpler option wins. An empty `0001_baseline` revision exists so that a freshly migrated database always has an `alembic_version` row.
+
+## D-004 — Enumerations as TEXT + CHECK, not Postgres ENUM types (M1)
+
+Roles, statuses, kinds and review decisions are `text` columns with `CHECK (col IN (...))`. Adding a value is a one-line constraint swap in a migration instead of `ALTER TYPE ... ADD VALUE` (which cannot run inside a transaction block on older servers and cannot remove values). The allowed values are defined once in `evidence_room/models.py`.
+
+## D-005 — SQL files are idempotent and applied by a migration that reads them (M1)
+
+`sql/triggers.sql` and `sql/views.sql` are plain SQL kept readable for the README. Migration `0003_integrity_sql` executes them. Both files are idempotent (`CREATE OR REPLACE FUNCTION`, `DROP TRIGGER IF EXISTS` / `CREATE TRIGGER`, `DROP VIEW IF EXISTS ... CASCADE` / `CREATE VIEW`). A later change to either file must ship with a new migration that re-applies it, so a database migrated from scratch and one migrated incrementally end up identical. Downgrade drops the views and triggers.
+
+**Cost:** replaying old migrations reads the *current* file, not the file as it was. Accepted because the files are idempotent and only ever re-applied in full.
+
+## D-006 — Protection is stricter than the plan's minimum (M1)
+
+- `findings`, `reviews`, `audit_log`: UPDATE and DELETE raise (as planned) **and TRUNCATE raises** (statement-level trigger). Row-level triggers alone do not fire on TRUNCATE, which would otherwise wipe the log silently.
+- `artifacts`: UPDATE is allowed only when it changes `purged_at` from NULL to a timestamp and touches nothing else. Once set, `purged_at` cannot change. **DELETE and TRUNCATE raise too**, because the purge command (M5) keeps the row and its hash and only deletes the file.
+- `audit_log` INSERT: a BEFORE INSERT trigger rejects a row whose `prev_hash` is not the current head's `hash` (or 64 zeros for the first row). The hash itself is computed in Python (canonical JSON is awkward in SQL); the trigger guards linkage against any writer that bypasses `audit.append`.
+
+## D-007 — Audit chain format and concurrency (M1)
+
+`hash = sha256(prev_hash || canonical_json(record))`, both as lowercase hex strings, where `record = {action, actor, at, entity, entity_id, payload}` serialised with sorted keys, `(",", ":")` separators, UTF-8 (`ensure_ascii=False`), `at` as ISO-8601 UTC with microseconds, `entity_id` as text. The genesis `prev_hash` is 64 zeros.
+
+- `audit.append` takes `pg_advisory_xact_lock` on a fixed key before reading the head, so concurrent writers serialise and the chain never forks. The lock is released with the caller's transaction, so the audit row commits or rolls back with the change it records.
+- Floats are rejected in payloads (they do not round-trip reliably through `jsonb`, which would make a correct chain fail verification).
+- `entity_id` is text so one log can reference any entity, including ones without integer ids.
+- The row `id` is not hashed; ordering is enforced by `prev_hash` linkage.
+
+**Known limits (written down, not hidden):**
+- Removing rows from the *tail* of the chain leaves a valid shorter chain. The DB already refuses DELETE; to make tail truncation detectable from outside, the evidence-pack manifest (M5) records the chain head hash at export time.
+- The database role that owns the tables can `ALTER TABLE ... DISABLE TRIGGER` (the M1 tamper test does exactly that). A hardened deployment should run the app and worker as a separate non-owner role with only `SELECT`/`INSERT` on protected tables (plus the narrow `UPDATE` on `artifacts.purged_at`). Not built in v1; noted for the README Limitations section.
+
+## D-008 — Regression and effective-status definitions in the views (M1)
+
+- **Effective status** (`v_effective_findings`): the latest review by `(created_at, id)` wins. `confirm` → the machine status; `override_pass` → `pass`; `override_gap` → `gap`; `not_applicable` → `not_applicable`; `needs_client_input` → `needs_client_input`; no review → the machine status.
+- **Regression** (`v_regressions`): compares each finished scan of a touchpoint with the previous finished scan (`status = 'done'`, ordered by `finished_at, id`). A fingerprint is *regressed* when it is `gap` now and was not `gap` before (`pass`, `review`, `info` or absent). It is *resolved* when it was `gap` before and is not `gap` now (including absent). The plan says "PASS or absent"; the broader "not gap" was chosen because a `review` → `gap` move is also something a lawyer wants to hear about, and it is simpler to state. A touchpoint's first finished scan is a baseline and produces no rows. Failed scans (`status = 'error'`) are skipped, so a failure never raises a regression (M2 rule).
+- Regressions use **machine** status, not effective status: a review belongs to one finding in one scan, and the alert is about what the scanner observed changing.
+- **Matter summary** (`v_matter_summary`): counts by matter, Article paragraph and effective status over the latest finished scan of each *active* touchpoint.
+
+## D-009 — `findings.target` column (M1)
+
+`PLAN.md`'s table has no column for which scanned thing a finding belongs to. A transcripts touchpoint yields one scanner result per conversation, and a media touchpoint one per file, so `findings.target` (the scanner's `TargetResult.target`) is added. M2 decides whether `target` goes into the normalised location used for the fingerprint.
+
+## D-010 — Tests use a real Postgres, not testcontainers (M1)
+
+Tests need Postgres-specific behaviour (triggers, `jsonb`, advisory locks, `DISTINCT ON`). Locally `make test` starts the compose `db` service; CI uses a `postgres:16` service container. `TEST_DATABASE_URL` names the server; the suite creates and drops its own `evidence_room_test` database, so it never touches application data. One fewer dependency than testcontainers, and the same path in both places.
+
+## D-011 — CI runs on every push and smoke-tests the full compose stack (M0/M1)
+
+CI runs on pushes to any branch, on pull requests and on manual dispatch, so a milestone can be verified on a branch before it reaches `main`. Besides ruff and pytest against a `postgres:16` service, the `compose-smoke` job builds all three images, waits for `db`, `app` and `worker` to be up, checks `/healthz`, and launches Chromium inside the worker to prove the `browser` extra is usable. This is the check behind M0's "`docker compose up` gives a healthy app".
